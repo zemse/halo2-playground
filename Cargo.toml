@@ -1,8 +1,9 @@
 [package]
-name = "is-zero"
+name = "halo2-playground"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+halo2_proofs = { git = "https://github.com/halo2-ce/halo2.git" }
