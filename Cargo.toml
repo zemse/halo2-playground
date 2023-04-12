@@ -6,4 +6,5 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-halo2_proofs = { git = "https://github.com/halo2-ce/halo2.git" }
+halo2_proofs = { git = "https://github.com/halo2-ce/halo2.git", features = ["dev-graph"] }
+plotters = "0.3.4"
