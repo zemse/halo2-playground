@@ -178,7 +178,7 @@ mod tests {
     }
 
     #[test]
-    fn test_circuit_0_pass() {
+    fn test_circuit_pass_1() {
         let prover = MockProver::run(
             K,
             &TestCircuit::<Fp, 4> {
@@ -192,5 +192,39 @@ mod tests {
 
         // Should success.
         assert_eq!(prover.verify(), Ok(()));
+    }
+
+    #[test]
+    fn test_circuit_pass_2() {
+        let prover = MockProver::run(
+            K,
+            &TestCircuit::<Fp, 4> {
+                left: 3,
+                right: 3,
+                _marker: Default::default(),
+            },
+            vec![vec![Fp::from(0)]],
+        )
+        .unwrap();
+
+        // Should success.
+        assert_eq!(prover.verify(), Ok(()));
+    }
+
+    #[test]
+    fn test_circuit_fail_1() {
+        let prover = MockProver::run(
+            K,
+            &TestCircuit::<Fp, 4> {
+                left: 3,
+                right: 3,
+                _marker: Default::default(),
+            },
+            vec![vec![Fp::from(3)]],
+        )
+        .unwrap();
+
+        // Should error.
+        assert!(prover.verify().is_err());
     }
 }
