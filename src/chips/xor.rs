@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 
 use halo2_proofs::{
-    circuit::{AssignedCell, Layouter, Value},
+    circuit::{AssignedCell, Layouter},
     halo2curves::FieldExt,
     plonk::{Advice, Column, ConstraintSystem, Error, Selector},
     poly::Rotation,
@@ -18,7 +18,7 @@ where
     F: FieldExt,
 {
     q_lookup: Selector, // do we need this?
-    xor_table: XorTableConfig<F, BITS>,
+    pub xor_table: XorTableConfig<F, BITS>,
     left_advice: Column<Advice>,
     right_advice: Column<Advice>,
     result_advice: Column<Advice>,
@@ -38,6 +38,8 @@ impl<F: FieldExt, const BITS: usize> XorChip<F, BITS> {
         let result_advice = meta.advice_column();
 
         // in case the result needs to be copied somewhere
+        meta.enable_equality(left_advice);
+        meta.enable_equality(right_advice);
         meta.enable_equality(result_advice);
 
         meta.lookup("lookup", |meta| {
@@ -63,34 +65,12 @@ impl<F: FieldExt, const BITS: usize> XorChip<F, BITS> {
         }
     }
 
-    pub fn synthesize_sub(&self, mut layouter: impl Layouter<F>) -> Result<(), Error> {
-        self.xor_table.load(&mut layouter.namespace(|| "xor table"))
-    }
-
     pub fn calculate_xor(
         &self,
         mut layouter: impl Layouter<F>,
-        left: u64,
-        right: u64,
+        left_cell_advice: AssignedCell<F, F>,
+        right_cell_advice: AssignedCell<F, F>,
     ) -> Result<AssignedCell<F, F>, Error> {
-        if left >= 1 << BITS {
-            panic!(
-                "left must be less than 2**BITS, left={}, BITS={}",
-                left, BITS
-            );
-        }
-        if right >= 1 << BITS {
-            panic!(
-                "left must be less than 2**BITS, right={}, BITS={}",
-                right, BITS
-            );
-        }
-
-        // convert to values
-        let left_val = Value::known(F::from(left));
-        let right_val = Value::known(F::from(right));
-        let result_val = Value::known(F::from(left ^ right));
-
         // assign xor calculation to the advice columns so they are checked in lookups
         let result_cell = layouter.assign_region(
             || "Assign value for lookup XOR check",
@@ -100,10 +80,27 @@ impl<F: FieldExt, const BITS: usize> XorChip<F, BITS> {
                 // Enable q_lookup
                 self.q_lookup.enable(&mut region, offset)?;
 
+                // Copy advice to lookup columns, this also performs the range check on the advice inputs
+                let left_cell = left_cell_advice.copy_advice(
+                    || "copy left",
+                    &mut region,
+                    self.left_advice,
+                    offset,
+                )?;
+                let right_cell = right_cell_advice.copy_advice(
+                    || "copy left",
+                    &mut region,
+                    self.right_advice,
+                    offset,
+                )?;
+
                 // Assign value
-                region.assign_advice(|| "left", self.left_advice, offset, || left_val)?;
-                region.assign_advice(|| "right", self.right_advice, offset, || right_val)?;
-                region.assign_advice(|| "result", self.result_advice, offset, || result_val)
+                let xor_result = left_cell
+                    .value()
+                    .zip(right_cell.value())
+                    .map(|(left, right)| left.get_lower_128() ^ right.get_lower_128())
+                    .map(|v| F::from_u128(v));
+                region.assign_advice(|| "result", self.result_advice, offset, || xor_result)
             },
         )?;
 
@@ -114,7 +111,7 @@ impl<F: FieldExt, const BITS: usize> XorChip<F, BITS> {
 #[cfg(test)]
 mod tests {
     use halo2_proofs::{
-        circuit::SimpleFloorPlanner,
+        circuit::{SimpleFloorPlanner, Value},
         dev::MockProver,
         halo2curves::pasta::Fp,
         plonk::{Circuit, Instance},
@@ -126,15 +123,32 @@ mod tests {
 
     #[derive(Default)]
     struct TestCircuit<F: FieldExt, const BITS: usize> {
-        left: u64,
-        right: u64,
+        left: F,
+        right: F,
         _marker: PhantomData<F>,
     }
 
     #[derive(Clone, Debug)]
     struct TestCircuitConfig<F: FieldExt, const BITS: usize> {
+        advice: Column<Advice>,
         xor_chip: XorChip<F, BITS>,
         result_instance: Column<Instance>,
+    }
+
+    impl<F: FieldExt, const BITS: usize> TestCircuit<F, BITS> {
+        fn load_advice(
+            &self,
+            config: TestCircuitConfig<F, BITS>,
+            mut layouter: impl halo2_proofs::circuit::Layouter<F>,
+            val: F,
+        ) -> Result<AssignedCell<F, F>, halo2_proofs::plonk::Error> {
+            layouter.assign_region(
+                || "load advice",
+                |mut region| {
+                    region.assign_advice(|| "assign advice", config.advice, 0, || Value::known(val))
+                },
+            )
+        }
     }
 
     impl<F: FieldExt, const BITS: usize> Circuit<F> for TestCircuit<F, BITS> {
@@ -147,13 +161,16 @@ mod tests {
         }
 
         fn configure(meta: &mut halo2_proofs::plonk::ConstraintSystem<F>) -> Self::Config {
+            let advice = meta.advice_column();
             let result_instance = meta.instance_column();
 
             // meta.enable_equality(value);
             // meta.enable_equality(value_inverse);
+            meta.enable_equality(advice);
             meta.enable_equality(result_instance);
 
             TestCircuitConfig::<F, BITS> {
+                advice,
                 xor_chip: XorChip::<F, BITS>::construct(meta),
                 result_instance,
             }
@@ -164,12 +181,28 @@ mod tests {
             config: Self::Config,
             mut layouter: impl halo2_proofs::circuit::Layouter<F>,
         ) -> Result<(), halo2_proofs::plonk::Error> {
-            let chip = config.xor_chip;
+            let xor_chip = config.xor_chip.clone();
 
-            chip.synthesize_sub(layouter.namespace(|| "chip synthesize_sub"))?;
+            xor_chip
+                .xor_table
+                .load(&mut layouter.namespace(|| "xor table"))?;
 
-            let result_cell =
-                chip.calculate_xor(layouter.namespace(|| "load value"), self.left, self.right)?;
+            let left_cell = self.load_advice(
+                config.clone(),
+                layouter.namespace(|| "assign left"),
+                self.left,
+            )?;
+            let right_cell = self.load_advice(
+                config.clone(),
+                layouter.namespace(|| "assign right"),
+                self.right,
+            )?;
+
+            let result_cell = xor_chip.calculate_xor(
+                layouter.namespace(|| "load value"),
+                left_cell,
+                right_cell,
+            )?;
 
             layouter.constrain_instance(result_cell.cell(), config.result_instance, 0)?;
 
@@ -182,8 +215,8 @@ mod tests {
         let prover = MockProver::run(
             K,
             &TestCircuit::<Fp, 4> {
-                left: 3,
-                right: 1,
+                left: Fp::from(3),
+                right: Fp::from(1),
                 _marker: Default::default(),
             },
             vec![vec![Fp::from(2)]],
@@ -199,11 +232,11 @@ mod tests {
         let prover = MockProver::run(
             K,
             &TestCircuit::<Fp, 4> {
-                left: 3,
-                right: 3,
+                left: Fp::from(3),
+                right: Fp::from(3),
                 _marker: Default::default(),
             },
-            vec![vec![Fp::from(0)]],
+            vec![vec![Fp::zero()]],
         )
         .unwrap();
 
@@ -216,8 +249,8 @@ mod tests {
         let prover = MockProver::run(
             K,
             &TestCircuit::<Fp, 4> {
-                left: 3,
-                right: 3,
+                left: Fp::from(3),
+                right: Fp::from(3),
                 _marker: Default::default(),
             },
             vec![vec![Fp::from(3)]],
